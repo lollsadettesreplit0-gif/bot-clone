@@ -1,16 +1,31 @@
 {
-  "name": "discord-server-cloner",
+  "name": "discord-server-cloner-bot",
   "version": "1.0.0",
+  "description": "Discord Server Cloner Bot - Auto clone servers with media and webhooks",
   "main": "index.js",
   "scripts": {
-    "start": "node index.js"
+    "start": "node index.js",
+    "dev": "nodemon index.js"
   },
+  "keywords": [
+    "discord",
+    "bot",
+    "cloner",
+    "webhook",
+    "automation"
+  ],
+  "author": "",
+  "license": "MIT",
   "dependencies": {
     "discord.js": "^14.14.0",
     "axios": "^1.6.5",
-    "dotenv": "^16.4.1"
+    "dotenv": "^16.3.1"
+  },
+  "devDependencies": {
+    "nodemon": "^3.0.2"
   },
   "engines": {
-    "node": ">=16.x"
+    "node": ">=18.0.0",
+    "npm": ">=9.0.0"
   }
 }
