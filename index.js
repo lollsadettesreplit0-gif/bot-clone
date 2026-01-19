@@ -1,477 +1,365 @@
-const { Client, GatewayIntentBits, ChannelType, EmbedBuilder } = require('discord.js');
-const fs = require('fs');
-const path = require('path');
+const { Client, ChannelType } = require('discord.js');
 const axios = require('axios');
+const fs = require('fs');
+const http = require('http');
+require('dotenv').config();
+
+const PORT = process.env.PORT || 3000;
+http.createServer((req, res) => {
+    res.writeHead(200, { 'Content-Type': 'text/plain' });
+    res.end('Discord cloner running!');
+}).listen(PORT);
+
+const TOKEN = process.env.DISCORD_TOKEN;
+const SOURCE_ID = process.env.SOURCE_GUILD_ID;
+const TARGET_ID = process.env.TARGET_GUILD_ID;
+const GITHUB_TOKEN = process.env.GITHUB_TOKEN;
+const GITHUB_REPO = process.env.GITHUB_REPO;
 
 const client = new Client({
     intents: [
-        GatewayIntentBits.Guilds,
-        GatewayIntentBits.GuildMessages,
-        GatewayIntentBits.MessageContent,
-        GatewayIntentBits.DirectMessages
+        'Guilds',
+        'DirectMessages',
+        'MessageContent'
     ]
 });
 
-// Variabili globali
-const DISCORD_TOKEN = process.env.DISCORD_TOKEN;
-const SOURCE_GUILD_ID = process.env.SOURCE_GUILD_ID;
-const TARGET_GUILD_ID = process.env.TARGET_GUILD_ID;
+let progress = { channels: {}, webhooks: {}, stats: { messages: 0, files: 0 } };
+let alreadyRan = false;
+let githubSha = null;
 
-const STATE_FILE = 'clone_state.json';
-const WEBHOOKS_FILE = 'webhooks.json';
-
-// Avatar invisibile (1x1 pixel trasparente)
-const INVISIBLE_AVATAR = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==';
-
-// Limite di upload in MB (Discord limit: 25MB per file)
-const MAX_FILE_SIZE = 25 * 1024 * 1024;
-
-function loadState() {
-    if (fs.existsSync(STATE_FILE)) {
-        return JSON.parse(fs.readFileSync(STATE_FILE, 'utf8'));
-    }
-    return {
-        categories: {},
-        channels: {},
-        webhooks: {},
-        cloning: false,
-        progress: 0,
-        completed: false
-    };
-}
-
-function saveState(state) {
-    fs.writeFileSync(STATE_FILE, JSON.stringify(state, null, 2));
-}
-
-function loadWebhooks() {
-    if (fs.existsSync(WEBHOOKS_FILE)) {
-        return JSON.parse(fs.readFileSync(WEBHOOKS_FILE, 'utf8'));
-    }
-    return {};
-}
-
-function saveWebhooks(webhooks) {
-    fs.writeFileSync(WEBHOOKS_FILE, JSON.stringify(webhooks, null, 2));
-}
-
-client.once('ready', async () => {
-    console.log(`✅ Bot online come ${client.user.tag}`);
-    console.log(`📊 Source Guild: ${SOURCE_GUILD_ID}`);
-    console.log(`🎯 Target Guild: ${TARGET_GUILD_ID}`);
-    
-    const state = loadState();
-    
-    // Se non è già stato clonato, avvia il processo automaticamente
-    if (!state.completed && !state.cloning) {
-        console.log('🚀 Avvio clonazione automatica...');
-        await startAutomaticClone();
-    } else if (state.cloning) {
-        console.log('⏳ Ripresa clonazione precedente...');
-        await startAutomaticClone();
-    } else {
-        console.log('✅ Clonazione già completata!');
-    }
-});
-
-async function startAutomaticClone() {
-    const state = loadState();
-
-    const sourceGuild = client.guilds.cache.get(SOURCE_GUILD_ID);
-    const targetGuild = client.guilds.cache.get(TARGET_GUILD_ID);
-
-    if (!sourceGuild || !targetGuild) {
-        console.error('❌ Guild non trovate!');
-        return;
+async function loadProgress() {
+    if (GITHUB_TOKEN && GITHUB_REPO) {
+        try {
+            const res = await axios.get(
+                `https://api.github.com/repos/${GITHUB_REPO}/contents/progress.json`,
+                { headers: { Authorization: `token ${GITHUB_TOKEN}` } }
+            );
+            githubSha = res.data.sha;
+            progress = JSON.parse(Buffer.from(res.data.content, 'base64').toString());
+            console.log(`✅ Loaded from GitHub`);
+            return;
+        } catch (err) {
+            console.log('📝 First run');
+        }
     }
 
-    state.cloning = true;
-    state.progress = 0;
-    saveState(state);
+    if (fs.existsSync('progress.json')) {
+        progress = JSON.parse(fs.readFileSync('progress.json', 'utf8'));
+    }
+}
 
-    console.log(`🔄 Inizio clonazione: ${sourceGuild.name} → ${targetGuild.name}`);
+function saveProgress() {
+    fs.writeFileSync('progress.json', JSON.stringify(progress, null, 2));
+}
+
+async function saveToGitHub() {
+    if (!GITHUB_TOKEN || !GITHUB_REPO) return;
 
     try {
-        // Step 0: Elimina tutti i canali e categorie dal target
-        console.log('🗑️  STEP 0: Eliminazione canali precedenti...');
-        await deleteAllChannels(targetGuild);
-        await new Promise(r => setTimeout(r, 2000));
+        const content = Buffer.from(JSON.stringify(progress, null, 2)).toString('base64');
+        const payload = {
+            message: `Update: ${progress.stats.messages} msgs`,
+            content: content,
+            branch: 'main'
+        };
+        if (githubSha) payload.sha = githubSha;
 
-        // Reset state
-        state.categories = {};
-        state.channels = {};
-        state.webhooks = {};
-        saveState(state);
-
-        // Step 1: Clona categorie
-        console.log('📁 STEP 1: Clonando categorie...');
-        await cloneCategories(sourceGuild, targetGuild, state);
-        await new Promise(r => setTimeout(r, 2000));
-        
-        // Step 2: Clona canali (con ordine e categoria corretti)
-        console.log('💬 STEP 2: Clonando canali...');
-        await cloneChannels(sourceGuild, targetGuild, state);
-        await new Promise(r => setTimeout(r, 2000));
-        
-        // Step 3: Copia media TRAMITE WEBHOOK
-        console.log('📸 STEP 3: Copiando media tramite webhook...');
-        await copyMedia(sourceGuild, targetGuild, state);
-
-        state.cloning = false;
-        state.completed = true;
-        saveState(state);
-
-        console.log('✅ CLONAZIONE COMPLETATA!');
-        console.log(`📊 Risultati:`);
-        console.log(`   - Categorie: ${Object.keys(state.categories).length}`);
-        console.log(`   - Canali: ${Object.keys(state.channels).length}`);
-        console.log(`   - Webhook: ${Object.keys(state.webhooks).length}`);
-        console.log('⏸️  Bot in standby... Non ripeterà la clonazione.');
-
-    } catch (error) {
-        console.error('❌ Errore clonazione:', error);
-        state.cloning = false;
-        saveState(state);
+        const res = await axios.put(
+            `https://api.github.com/repos/${GITHUB_REPO}/contents/progress.json`,
+            payload,
+            { headers: { Authorization: `token ${GITHUB_TOKEN}` } }
+        );
+        githubSha = res.data.content.sha;
+    } catch (err) {
+        console.error('⚠️ GitHub error');
     }
 }
 
-client.on('messageCreate', async (message) => {
-    if (message.author.bot) return;
+client.on('ready', async () => {
+    if (alreadyRan) return;
+    alreadyRan = true;
 
-    // Comando: !status
-    if (message.content === '!status') {
-        const state = loadState();
-        const webhooks = loadWebhooks();
-        
-        const embed = new EmbedBuilder()
-            .setColor('#667eea')
-            .setTitle('📊 Status Clonazione')
-            .addFields(
-                { name: 'Completata', value: state.completed ? '✅ Sì' : '❌ No', inline: true },
-                { name: 'In corso', value: state.cloning ? 'Sì' : 'No', inline: true },
-                { name: 'Categorie', value: Object.keys(state.categories).length.toString(), inline: true },
-                { name: 'Canali', value: Object.keys(state.channels).length.toString(), inline: true },
-                { name: 'Webhook', value: Object.keys(webhooks).length.toString(), inline: true }
-            );
+    console.log(`✅ Bot: ${client.user.tag}`);
 
-        message.reply({ embeds: [embed] });
+    const source = client.guilds.cache.get(SOURCE_ID);
+    const target = client.guilds.cache.get(TARGET_ID);
+
+    if (!source || !target) {
+        console.error('❌ Servers not found');
+        process.exit(1);
     }
 
-    // Comando: !webhooks
-    if (message.content === '!webhooks') {
-        const webhooks = loadWebhooks();
-        const list = Object.entries(webhooks)
-            .map(([id, data]) => `🪝 ${data.channel_name}`)
-            .join('\n');
+    await loadProgress();
 
-        const embed = new EmbedBuilder()
-            .setColor('#667eea')
-            .setTitle('🪝 Webhook Disponibili')
-            .setDescription(list || 'Nessun webhook creato');
+    try {
+        console.log('🎯 CLONING SERVER');
 
-        message.reply({ embeds: [embed] });
-    }
-
-    // Comando: !reset (resetta e riavvia)
-    if (message.content === '!reset') {
-        const state = loadState();
-        state.completed = false;
-        state.cloning = false;
-        state.categories = {};
-        state.channels = {};
-        state.webhooks = {};
-        saveState(state);
-        
-        message.reply('🔄 Reset completato! Riavvia il bot per clonare di nuovo.');
-    }
-});
-
-async function deleteAllChannels(targetGuild) {
-    const channels = targetGuild.channels.cache.toJSON();
-    
-    for (const channel of channels) {
-        try {
-            await channel.delete();
-            console.log(`   🗑️  Eliminato: ${channel.name}`);
-            await new Promise(r => setTimeout(r, 500));
-        } catch (error) {
-            console.error(`   ❌ Errore eliminazione ${channel.name}: ${error.message}`);
+        // STEP 0: Check if already cloned
+        if (Object.keys(progress.channels).length > 0) {
+            console.log('✅ Already cloning, resuming...');
+        } else {
+            // Only delete on FIRST run
+            console.log('🗑️ Deleting old channels...');
+            const toDelete = Array.from(source.channels.cache.values());
+            for (const ch of toDelete) {
+                try {
+                    await ch.delete();
+                    console.log(`  ✓ Deleted: ${ch.name}`);
+                    await sleep(300);
+                } catch (err) {
+                    console.error(`  ✗ Error: ${ch.name}`);
+                }
+            }
+            await sleep(2000);
+            console.log('✅ Deletion complete');
         }
-    }
-    
-    console.log(`✅ Tutti i canali eliminati`);
-}
 
-async function cloneCategories(sourceGuild, targetGuild, state) {
-    for (const category of sourceGuild.channels.cache.filter(c => c.type === ChannelType.GuildCategory).values()) {
-        try {
-            const newCategory = await targetGuild.channels.create({
-                name: category.name,
-                type: ChannelType.GuildCategory,
-                permissionOverwrites: category.permissionOverwrites
-            });
+        // STEP 1: Clone structure ONLY if not already done
+        if (Object.keys(progress.channels).length === 0) {
+            console.log('📁 Cloning structure...');
+            const catMap = new Map();
+            const cats = target.channels.cache
+                .filter(ch => ch.type === 4)
+                .sort((a, b) => a.position - b.position);
 
-            state.categories[category.id] = newCategory.id;
-            console.log(`   ✅ ${category.name}`);
-            await new Promise(r => setTimeout(r, 800));
+            for (const cat of cats.values()) {
+                const newCat = await source.channels.create({
+                    name: cat.name,
+                    type: 4,
+                    position: cat.position
+                }).catch(() => null);
 
-        } catch (error) {
-            console.error(`   ❌ ${category.name}: ${error.message}`);
-        }
-    }
-    console.log(`✅ Categorie completate: ${Object.keys(state.categories).length}`);
-}
+                if (newCat) {
+                    catMap.set(cat.id, newCat.id);
+                    console.log(`  ✓ Category: ${cat.name}`);
+                }
+                await sleep(300);
+            }
 
-async function cloneChannels(sourceGuild, targetGuild, state) {
-    // Ordina i canali per posizione e categoria
-    const categories = Array.from(sourceGuild.channels.cache.values())
-        .filter(c => c.type === ChannelType.GuildCategory)
-        .sort((a, b) => a.position - b.position);
+            // Clone text channels
+            for (const [targetCatId, sourceCatId] of catMap.entries()) {
+                const textChs = target.channels.cache
+                    .filter(ch => ch.parentId === targetCatId && ch.type === 0)
+                    .sort((a, b) => a.position - b.position);
 
-    // Clona canali per categoria SOLO TRAMITE WEBHOOK
-    for (const category of categories) {
-        console.log(`   📁 Categoria: ${category.name}`);
-        
-        const channelsInCategory = Array.from(sourceGuild.channels.cache.values())
-            .filter(c => c.parentId === category.id && c.type !== ChannelType.GuildCategory)
-            .sort((a, b) => a.position - b.position);
+                for (const ch of textChs.values()) {
+                    const newCh = await source.channels.create({
+                        name: ch.name,
+                        type: 0,
+                        parent: sourceCatId,
+                        nsfw: true,
+                        position: ch.position
+                    }).catch(() => null);
 
-        for (const channel of channelsInCategory) {
-            try {
-                const parentId = state.categories[category.id];
-
-                if (channel.type === ChannelType.GuildText) {
-                    // Crea il canale SOLO come struttura, NON inviare messaggi
-                    const newChannel = await targetGuild.channels.create({
-                        name: channel.name,
-                        type: ChannelType.GuildText,
-                        parent: parentId,
-                        topic: channel.topic,
-                        nsfw: true
-                    });
-
-                    state.channels[channel.id] = newChannel.id;
-                    console.log(`      ✅ #${channel.name} (NSFW - no messages)`);
-
-                } else if (channel.type === ChannelType.GuildVoice) {
-                    const newChannel = await targetGuild.channels.create({
-                        name: channel.name,
-                        type: ChannelType.GuildVoice,
-                        parent: parentId
-                    });
-
-                    state.channels[channel.id] = newChannel.id;
-                    console.log(`      ✅ 🎤 ${channel.name}`);
+                    if (newCh) {
+                        progress.channels[ch.id] = newCh.id;
+                        console.log(`  ✓ Channel: ${ch.name}`);
+                    }
+                    await sleep(300);
                 }
 
-                await new Promise(r => setTimeout(r, 800));
+                // Clone voice channels
+                const voiceChs = target.channels.cache
+                    .filter(ch => ch.parentId === targetCatId && ch.type === 2)
+                    .sort((a, b) => a.position - b.position);
 
-            } catch (error) {
-                console.error(`      ❌ ${channel.name}: ${error.message}`);
-            }
-        }
-    }
-
-    // Clona canali senza categoria
-    const noCategory = Array.from(sourceGuild.channels.cache.values())
-        .filter(c => !c.parentId && c.type !== ChannelType.GuildCategory)
-        .sort((a, b) => a.position - b.position);
-
-    if (noCategory.length > 0) {
-        console.log(`   📋 Canali senza categoria:`);
-        
-        for (const channel of noCategory) {
-            try {
-                if (channel.type === ChannelType.GuildText) {
-                    const newChannel = await targetGuild.channels.create({
-                        name: channel.name,
-                        type: ChannelType.GuildText,
-                        topic: channel.topic,
-                        nsfw: true
-                    });
-
-                    state.channels[channel.id] = newChannel.id;
-                    console.log(`      ✅ #${channel.name} (NSFW - no messages)`);
-
-                } else if (channel.type === ChannelType.GuildVoice) {
-                    const newChannel = await targetGuild.channels.create({
-                        name: channel.name,
-                        type: ChannelType.GuildVoice
-                    });
-
-                    state.channels[channel.id] = newChannel.id;
-                    console.log(`      ✅ 🎤 ${channel.name}`);
+                for (const ch of voiceChs.values()) {
+                    await source.channels.create({
+                        name: ch.name,
+                        type: 2,
+                        parent: sourceCatId,
+                        position: ch.position
+                    }).catch(() => null);
+                    console.log(`  ✓ Voice: ${ch.name}`);
+                    await sleep(300);
                 }
-
-                await new Promise(r => setTimeout(r, 800));
-
-            } catch (error) {
-                console.error(`      ❌ ${channel.name}: ${error.message}`);
             }
+
+            saveProgress();
+            console.log('✅ Structure cloned');
+        } else {
+            console.log('✅ Structure already exists, skipping...');
         }
-    }
 
-    saveState(state);
-    console.log(`✅ Canali completati: ${Object.keys(state.channels).length}`);
-}
+        // STEP 2: Create webhooks for NSFW channels
+        console.log('🪝 Creating webhooks...');
+        for (const [targetChId, sourceChId] of Object.entries(progress.channels)) {
+            if (progress.webhooks[sourceChId]) {
+                console.log(`  ⏭️ Webhook exists: ${sourceChId}`);
+                continue;
+            }
 
-async function copyMedia(sourceGuild, targetGuild, state) {
-    let totalMedia = 0;
-    let largeFiles = 0;
-    
-    // Crea i webhook per tutti i canali
-    console.log('   🪝 Creazione webhook...');
-    const webhooks = await createWebhooksFirst(targetGuild);
-    saveWebhooks(webhooks);
-    
-    for (const [sourceId, targetId] of Object.entries(state.channels)) {
-        const sourceChannel = sourceGuild.channels.cache.get(sourceId);
-        const targetChannel = targetGuild.channels.cache.get(targetId);
+            const sourceCh = source.channels.cache.get(sourceChId);
+            if (!sourceCh || sourceCh.nsfw === false) continue;
 
-        if (!sourceChannel || !targetChannel || sourceChannel.type !== ChannelType.GuildText) continue;
+            try {
+                const webhook = await sourceCh.createWebhook({
+                    name: 'GRINDR_UPLOADER',
+                    avatar: null
+                }).catch(() => null);
 
-        try {
-            let count = 0;
-            const messages = await sourceChannel.messages.fetch({ limit: 100 });
+                if (webhook) {
+                    progress.webhooks[sourceChId] = {
+                        id: webhook.id,
+                        token: webhook.token
+                    };
+                    console.log(`  ✓ Webhook: #${sourceCh.name}`);
+                }
+            } catch (err) {
+                console.error(`  ✗ Error: #${sourceCh.name}`);
+            }
+            await sleep(300);
+        }
 
-            for (const message of messages.values()) {
-                for (const attachment of message.attachments.values()) {
-                    if (attachment.contentType?.startsWith('image/') || attachment.contentType?.startsWith('video/')) {
+        saveProgress();
+        console.log('✅ Webhooks created');
+
+        // STEP 3: Copy messages
+        console.log('📥 Copying messages...');
+
+        for (const [targetChId, sourceChId] of Object.entries(progress.channels)) {
+            if (progress.channels[targetChId].copied) {
+                console.log(`⏭️ #${targetChId}`);
+                continue;
+            }
+
+            const targetCh = target.channels.cache.get(targetChId);
+            const sourceCh = source.channels.cache.get(sourceChId);
+
+            if (!targetCh || !sourceCh) continue;
+
+            if (!progress.channels[targetChId]) {
+                progress.channels[targetChId] = { copied: false, lastId: null, count: 0 };
+            }
+
+            try {
+                console.log(`📂 Copying #${targetCh.name}...`);
+                let lastId = progress.channels[targetChId].lastId;
+                let count = progress.channels[targetChId].count;
+
+                while (true) {
+                    const opts = { limit: 50 };
+                    if (lastId) opts.before = lastId;
+
+                    const msgs = await targetCh.messages.fetch(opts).catch(() => null);
+                    if (!msgs || msgs.size === 0) break;
+
+                    const msgsArray = Array.from(msgs.values()).reverse();
+
+                    for (const msg of msgsArray) {
                         try {
-                            const fileExt = attachment.name.split('.').pop() || 'mp4';
-                            const fileName = `GRINDR.${fileExt}`;
-                            const fileSize = attachment.size;
-                            
-                            // Webhook per questo canale
-                            const webhook = webhooks[targetChannel.id];
-                            if (!webhook) {
-                                console.log(`   ⚠️  Nessun webhook per ${targetChannel.name}`);
-                                continue;
+                            if (msg.system || msg.author.bot) continue;
+                            if (!msg.content && msg.attachments.size === 0 && msg.embeds.length === 0) continue;
+
+                            const files = [];
+
+                            for (const att of msg.attachments.values()) {
+                                try {
+                                    const ext = att.name.split('.').pop();
+                                    const data = await downloadFile(att.url);
+                                    if (data) {
+                                        files.push({ attachment: data, name: `GRINDR.${ext}` });
+                                        progress.stats.files++;
+                                    }
+                                } catch (err) {
+                                    console.log(`    ⚠️ Download failed: ${att.name}`);
+                                }
                             }
-                            
-                            // Se il file è troppo grande (>25MB), invia SOLO il link (senza embed)
-                            if (fileSize > MAX_FILE_SIZE) {
-                                largeFiles++;
-                                
+
+                            // Use webhook if available, else direct send
+                            const webhook = progress.webhooks[sourceChId];
+                            if (webhook && files.length > 0) {
                                 try {
-                                    // Manda SOLO il link diretto, niente embed
-                                    await axios.post(webhook.url, {
-                                        content: attachment.url,
-                                        username: 'GRINDR UPLOADERS',
-                                        avatar_url: INVISIBLE_AVATAR
-                                    });
-                                    console.log(`      📥 Link: ${fileName} (${(fileSize / 1024 / 1024).toFixed(2)}MB)`);
-                                } catch (webhookError) {
-                                    console.error(`      ❌ Errore webhook: ${webhookError.message}`);
+                                    await axios.post(
+                                        `https://discordapp.com/api/webhooks/${webhook.id}/${webhook.token}`,
+                                        { files: files },
+                                        { headers: { 'Content-Type': 'multipart/form-data' } }
+                                    ).catch(() => {});
+                                } catch (err) {
+                                    await sourceCh.send({ files: files }).catch(() => {});
                                 }
+                            } else if (files.length > 0) {
+                                await sourceCh.send({ files: files }).catch(() => {});
+                            }
 
-                            } else {
-                                // File piccolo - carica il file completo tramite webhook
-                                try {
-                                    const fileBuffer = await axios.get(attachment.url, { 
-                                        responseType: 'arraybuffer',
-                                        timeout: 30000
-                                    });
+                            if (msg.embeds.length > 0) {
+                                await sourceCh.send({ embeds: msg.embeds.slice(0, 10) }).catch(() => {});
+                            }
 
-                                    const FormData = require('form-data');
-                                    const formData = new FormData();
-                                    formData.append('file', Buffer.from(fileBuffer.data), fileName);
-                                    formData.append('username', 'GRINDR UPLOADERS');
-                                    formData.append('avatar_url', INVISIBLE_AVATAR);
-
-                                    await axios.post(webhook.url, formData, {
-                                        headers: formData.getHeaders()
-                                    });
-                                    console.log(`      ✅ File: ${fileName} (${(fileSize / 1024 / 1024).toFixed(2)}MB)`);
-                                } catch (webhookError) {
-                                    console.error(`      ❌ Errore upload: ${webhookError.message}`);
-                                }
+                            if (msg.content && files.length === 0) {
+                                await sourceCh.send({ content: msg.content.slice(0, 2000) }).catch(() => {});
                             }
 
                             count++;
-                            totalMedia++;
-                            await new Promise(r => setTimeout(r, 500));
+                            progress.stats.messages++;
+                            progress.channels[targetChId].lastId = msg.id;
+                            progress.channels[targetChId].count = count;
+                            saveProgress();
 
-                        } catch (error) {
-                            console.error(`      ❌ Errore media: ${error.message}`);
+                            if (progress.stats.messages % 20 === 0) {
+                                await saveToGitHub();
+                            }
+
+                            await sleep(500);
+
+                        } catch (err) {
+                            saveProgress();
+                            await sleep(2000);
                         }
                     }
+
+                    lastId = msgs.last().id;
+                    await sleep(2000);
                 }
+
+                progress.channels[targetChId].copied = true;
+                saveProgress();
+                await saveToGitHub();
+
+            } catch (err) {
+                console.error(`✗ Error: #${targetCh.name}`);
+                saveProgress();
             }
 
-            if (count > 0) {
-                console.log(`   📸 ${sourceChannel.name}: ${count} media`);
-            }
-
-        } catch (error) {
-            console.error(`   ❌ Errore ${sourceChannel.name}: ${error.message}`);
+            await sleep(1000);
         }
 
-        await new Promise(r => setTimeout(r, 1500));
+        console.log('');
+        console.log('═════════════════════════════════');
+        console.log('✅ CLONE COMPLETE!');
+        console.log('═════════════════════════════════');
+        console.log(`Messages: ${progress.stats.messages}`);
+        console.log(`Files: ${progress.stats.files}`);
+        console.log('═════════════════════════════════');
+
+        process.exit(0);
+
+    } catch (err) {
+        console.error('❌ Error:', err);
+        saveProgress();
+        process.exit(1);
     }
-    
-    console.log(`✅ Media completati tramite webhook: ${totalMedia} (${largeFiles} come link diretto)`);
+});
+
+async function downloadFile(url) {
+    try {
+        const res = await axios.get(url, {
+            responseType: 'arraybuffer',
+            timeout: 30000,
+            maxContentLength: 50000000
+        });
+        return Buffer.from(res.data);
+    } catch (err) {
+        return null;
+    }
 }
 
-async function createWebhooksFirst(targetGuild) {
-    const webhooks = {};
-
-    for (const channel of targetGuild.channels.cache.values()) {
-        if (channel.type !== ChannelType.GuildText) continue;
-
-        try {
-            const webhook = await channel.createWebhook({
-                name: 'GRINDR UPLOADERS',
-                avatar: INVISIBLE_AVATAR
-            });
-
-            webhooks[channel.id] = {
-                url: webhook.url,
-                channel_name: channel.name,
-                webhook_id: webhook.id
-            };
-
-            console.log(`   ✅ ${channel.name}`);
-            await new Promise(r => setTimeout(r, 300));
-
-        } catch (error) {
-            console.error(`   ❌ ${channel.name}: ${error.message}`);
-        }
-    }
-
-    return webhooks;
+function sleep(ms) {
+    return new Promise(resolve => setTimeout(resolve, ms));
 }
 
-async function createWebhooks(targetGuild, state) {
-    const webhooks = loadWebhooks();
-    let webhookCount = 0;
-
-    for (const channel of targetGuild.channels.cache.values()) {
-        if (channel.type !== ChannelType.GuildText) continue;
-
-        try {
-            const webhook = await channel.createWebhook({
-                name: 'GRINDR UPLOADERS',
-                avatar: INVISIBLE_AVATAR
-            });
-
-            webhooks[channel.id] = {
-                url: webhook.url,
-                channel_name: channel.name,
-                webhook_id: webhook.id
-            };
-
-            console.log(`   🪝 #${channel.name}`);
-            webhookCount++;
-            await new Promise(r => setTimeout(r, 500));
-
-        } catch (error) {
-            console.error(`   ❌ ${channel.name}: ${error.message}`);
-        }
-    }
-
-    saveWebhooks(webhooks);
-    console.log(`✅ Webhook completati: ${webhookCount}`);
-}
-
-client.login(DISCORD_TOKEN);
+client.login(TOKEN).catch(err => {
+    console.error('❌ Login failed:', err.message);
+    process.exit(1);
+});
