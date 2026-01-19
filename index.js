@@ -19,10 +19,8 @@ const GITHUB_REPO = process.env.GITHUB_REPO;
 const client = new Client({
     intents: [
         'Guilds',
-        'GuildChannels',
-        'GuildMessages',
-        'MessageContent',
-        'DirectMessages'
+        'DirectMessages',
+        'MessageContent'
     ]
 });
 
