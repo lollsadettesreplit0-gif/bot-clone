@@ -1,6 +1,5 @@
 const { Client, ChannelType } = require('discord.js');
 const axios = require('axios');
-const fs = require('fs');
 const http = require('http');
 require('dotenv').config();
 
@@ -15,7 +14,6 @@ const SOURCE_ID = process.env.SOURCE_GUILD_ID;
 const TARGET_ID = process.env.TARGET_GUILD_ID;
 
 const client = new Client({ intents: ['Guilds', 'DirectMessages', 'MessageContent'] });
-
 let started = false;
 
 function sleep(ms) {
@@ -31,137 +29,98 @@ async function downloadFile(url) {
         });
         return Buffer.from(res.data);
     } catch (e) {
-        console.error(`    ❌ Download failed: ${e.message}`);
         return null;
     }
 }
 
-client.on('ready', async () => {
+client.once('ready', async () => {
     if (started) return;
     started = true;
+
+    console.log(`\n✅ Bot connected: ${client.user.tag}\n`);
 
     const src = client.guilds.cache.get(SOURCE_ID);
     const tgt = client.guilds.cache.get(TARGET_ID);
 
     if (!src || !tgt) {
-        console.error('❌ Servers not found');
+        console.error('❌ SOURCE_ID or TARGET_ID not found');
         process.exit(1);
     }
 
-    console.log(`\n🎯 Cloning: ${tgt.name} → ${src.name}\n`);
+    console.log(`From: ${tgt.name} (${TARGET_ID})`);
+    console.log(`To: ${src.name} (${SOURCE_ID})\n`);
 
     try {
-        // STEP 1: Delete all channels and categories
-        console.log('🗑️  STEP 1: Deleting all channels and categories...');
-        const allChannels = Array.from(src.channels.cache.values());
-        for (const ch of allChannels) {
+        // STEP 1: Delete all
+        console.log('🗑️  Deleting old channels...');
+        let deleted = 0;
+        for (const ch of src.channels.cache.values()) {
             try {
                 await ch.delete();
-                console.log(`  ✓ Deleted: ${ch.name}`);
+                deleted++;
                 await sleep(300);
             } catch (e) {
-                console.error(`  ✗ Error: ${ch.name}`);
+                console.log(`  ⚠️  Failed: ${ch.name}`);
             }
         }
-        console.log('✅ Deletion complete\n');
+        console.log(`✅ Deleted ${deleted} channels\n`);
         await sleep(2000);
 
-        // STEP 2: Clone categories and channels structure
-        console.log('📁 STEP 2: Cloning structure...');
+        // STEP 2: Clone categories
+        console.log('📁 Cloning categories...');
         const catMap = new Map();
+        
+        const cats = Array.from(tgt.channels.cache.values())
+            .filter(c => c.type === ChannelType.GuildCategory);
 
-        // Clone categories
-        const categories = Array.from(tgt.channels.cache.values())
-            .filter(c => c.type === ChannelType.GuildCategory)
-            .sort((a, b) => a.position - b.position);
-
-        for (const cat of categories) {
+        for (const cat of cats) {
             try {
-                const nc = await src.channels.create({
+                const newCat = await src.channels.create({
                     name: cat.name,
                     type: ChannelType.GuildCategory,
                     position: cat.position
                 });
-                catMap.set(cat.id, nc.id);
-                console.log(`  ✓ Category: ${cat.name}`);
-                await sleep(300);
+                catMap.set(cat.id, newCat.id);
+                console.log(`  ✓ ${cat.name}`);
+                await sleep(500);
             } catch (e) {
-                console.error(`  ✗ Category ${cat.name}: ${e.message}`);
+                console.log(`  ✗ Failed: ${cat.name}`);
             }
         }
+        console.log(`✅ Done: ${catMap.size} categories\n`);
 
-        // Clone text channels in categories
-        console.log('\n💬 Cloning text channels...');
-        for (const [tgtCatId, srcCatId] of catMap.entries()) {
-            const textChannels = Array.from(tgt.channels.cache.values())
-                .filter(c => c.parentId === tgtCatId && c.type === ChannelType.GuildText)
-                .sort((a, b) => a.position - b.position);
+        // STEP 3: Clone text channels
+        console.log('💬 Cloning text channels...');
+        const chMap = new Map();
 
-            for (const ch of textChannels) {
-                try {
-                    await src.channels.create({
-                        name: ch.name,
-                        type: ChannelType.GuildText,
-                        parent: srcCatId,
-                        nsfw: true,
-                        position: ch.position
-                    });
-                    console.log(`  ✓ #${ch.name} (NSFW)`);
-                    await sleep(300);
-                } catch (e) {
-                    console.error(`  ✗ #${ch.name}: ${e.message}`);
-                }
+        const textChs = Array.from(tgt.channels.cache.values())
+            .filter(c => c.type === ChannelType.GuildText);
+
+        for (const ch of textChs) {
+            try {
+                const parentId = ch.parentId ? catMap.get(ch.parentId) : null;
+                
+                const newCh = await src.channels.create({
+                    name: ch.name,
+                    type: ChannelType.GuildText,
+                    parent: parentId || undefined,
+                    nsfw: true,
+                    position: ch.position
+                });
+                chMap.set(ch.id, newCh.id);
+                console.log(`  ✓ #${ch.name}`);
+                await sleep(500);
+            } catch (e) {
+                console.log(`  ✗ Failed: ${ch.name}`);
             }
         }
+        console.log(`✅ Done: ${chMap.size} text channels\n`);
 
-        // Clone voice channels in categories
-        console.log('\n🎤 Cloning voice channels...');
-        for (const [tgtCatId, srcCatId] of catMap.entries()) {
-            const voiceChannels = Array.from(tgt.channels.cache.values())
-                .filter(c => c.parentId === tgtCatId && c.type === ChannelType.GuildVoice)
-                .sort((a, b) => a.position - b.position);
-
-            for (const ch of voiceChannels) {
-                try {
-                    await src.channels.create({
-                        name: ch.name,
-                        type: ChannelType.GuildVoice,
-                        parent: srcCatId,
-                        position: ch.position
-                    });
-                    console.log(`  ✓ 🎤 ${ch.name}`);
-                    await sleep(300);
-                } catch (e) {
-                    console.error(`  ✗ ${ch.name}: ${e.message}`);
-                }
-            }
-        }
-
-        console.log('✅ Structure cloned\n');
-        await sleep(2000);
-
-        // STEP 3: Copy messages and media
-        console.log('📥 STEP 3: Copying messages and media...\n');
-
-        const textChannelMap = new Map();
-        for (const [tgtCatId, srcCatId] of catMap.entries()) {
-            const tgtTextChs = Array.from(tgt.channels.cache.values())
-                .filter(c => c.parentId === tgtCatId && c.type === ChannelType.GuildText);
-
-            for (const tgtCh of tgtTextChs) {
-                const srcChs = Array.from(src.channels.cache.values())
-                    .filter(c => c.parentId === srcCatId && c.name === tgtCh.name && c.type === ChannelType.GuildText);
-
-                if (srcChs.length > 0) {
-                    textChannelMap.set(tgtCh.id, srcChs[0].id);
-                }
-            }
-        }
-
-        let totalMessages = 0;
+        // STEP 4: Copy files
+        console.log('📥 Copying files...\n');
         let totalFiles = 0;
 
-        for (const [tgtChId, srcChId] of textChannelMap.entries()) {
+        for (const [tgtChId, srcChId] of chMap) {
             const tgtCh = tgt.channels.cache.get(tgtChId);
             const srcCh = src.channels.cache.get(srcChId);
 
@@ -169,7 +128,7 @@ client.on('ready', async () => {
 
             try {
                 console.log(`  📂 #${tgtCh.name}`);
-                let fileCount = 0;
+                let count = 0;
                 let lastId = null;
 
                 while (true) {
@@ -181,56 +140,42 @@ client.on('ready', async () => {
                     if (!msgs || msgs.size === 0) break;
 
                     for (const msg of Array.from(msgs.values()).reverse()) {
-                        if (msg.system || msg.author.bot) continue;
-
-                        // ONLY send files, no messages
                         for (const att of msg.attachments.values()) {
-                            // Only images and videos
                             if (att.contentType && (att.contentType.startsWith('image/') || att.contentType.startsWith('video/'))) {
                                 const ext = att.name.split('.').pop() || 'mp4';
-                                const fileName = `GRINDR.${ext}`;
-                                
-                                console.log(`     ⬇️  ${att.name}`);
                                 const fileData = await downloadFile(att.url);
-                                
+
                                 if (fileData) {
-                                    console.log(`     ⬆️  ${fileName}`);
                                     await srcCh.send({
                                         files: [{
                                             attachment: fileData,
-                                            name: fileName
+                                            name: `GRINDR.${ext}`
                                         }]
-                                    }).catch((e) => {
-                                        console.error(`     ❌ Upload failed: ${e.message}`);
-                                    });
-                                    fileCount++;
+                                    }).catch(() => {});
+                                    count++;
+                                    totalFiles++;
                                 }
                             }
                         }
-
-                        await sleep(300);
+                        await sleep(200);
                     }
 
                     lastId = msgs.last().id;
                     await sleep(1000);
                 }
 
-                console.log(`     ✅ ${fileCount} files`);
-                totalFiles += fileCount;
-
+                console.log(`     ✅ ${count} files\n`);
             } catch (err) {
-                console.error(`  ❌ #${tgtCh.name}: ${err.message}`);
+                console.log(`  ❌ Error\n`);
             }
 
             await sleep(500);
         }
 
-        console.log('\n' + '═'.repeat(40));
-        console.log('✅ CLONE COMPLETE!');
         console.log('═'.repeat(40));
+        console.log('✅ CLONE COMPLETE!');
         console.log(`📁 Total Files: ${totalFiles}`);
         console.log('═'.repeat(40) + '\n');
-
         process.exit(0);
 
     } catch (err) {
@@ -240,6 +185,6 @@ client.on('ready', async () => {
 });
 
 client.login(TOKEN).catch(err => {
-    console.error('❌ Login failed:', err.message);
+    console.error('❌ Login failed');
     process.exit(1);
 });
