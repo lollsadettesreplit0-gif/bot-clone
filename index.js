@@ -13,8 +13,6 @@ http.createServer((req, res) => {
 const TOKEN = process.env.DISCORD_TOKEN;
 const SOURCE_ID = process.env.SOURCE_GUILD_ID;
 const TARGET_ID = process.env.TARGET_GUILD_ID;
-const GITHUB_TOKEN = process.env.GITHUB_TOKEN;
-const GITHUB_REPO = process.env.GITHUB_REPO;
 
 const client = new Client({
     intents: [
@@ -24,56 +22,18 @@ const client = new Client({
     ]
 });
 
-let progress = { channels: {}, webhooks: {}, stats: { messages: 0, files: 0 } };
+let progress = { channels: {}, stats: { messages: 0, files: 0 } };
 let alreadyRan = false;
-let githubSha = null;
 
 async function loadProgress() {
-    if (GITHUB_TOKEN && GITHUB_REPO) {
-        try {
-            const res = await axios.get(
-                `https://api.github.com/repos/${GITHUB_REPO}/contents/progress.json`,
-                { headers: { Authorization: `token ${GITHUB_TOKEN}` } }
-            );
-            githubSha = res.data.sha;
-            progress = JSON.parse(Buffer.from(res.data.content, 'base64').toString());
-            console.log(`✅ Loaded from GitHub`);
-            return;
-        } catch (err) {
-            console.log('📝 First run');
-        }
-    }
-
     if (fs.existsSync('progress.json')) {
         progress = JSON.parse(fs.readFileSync('progress.json', 'utf8'));
+        console.log('📝 Loaded progress');
     }
 }
 
 function saveProgress() {
     fs.writeFileSync('progress.json', JSON.stringify(progress, null, 2));
-}
-
-async function saveToGitHub() {
-    if (!GITHUB_TOKEN || !GITHUB_REPO) return;
-
-    try {
-        const content = Buffer.from(JSON.stringify(progress, null, 2)).toString('base64');
-        const payload = {
-            message: `Update: ${progress.stats.messages} msgs`,
-            content: content,
-            branch: 'main'
-        };
-        if (githubSha) payload.sha = githubSha;
-
-        const res = await axios.put(
-            `https://api.github.com/repos/${GITHUB_REPO}/contents/progress.json`,
-            payload,
-            { headers: { Authorization: `token ${GITHUB_TOKEN}` } }
-        );
-        githubSha = res.data.content.sha;
-    } catch (err) {
-        console.error('⚠️ GitHub error');
-    }
 }
 
 client.on('ready', async () => {
@@ -95,12 +55,9 @@ client.on('ready', async () => {
     try {
         console.log('🎯 CLONING SERVER');
 
-        // STEP 0: Check if already cloned
-        if (Object.keys(progress.channels).length > 0) {
-            console.log('✅ Already cloning, resuming...');
-        } else {
-            // Only delete on FIRST run
-            console.log('🗑️ Deleting old channels...');
+        // STEP 0: Delete all channels only on FIRST run
+        if (Object.keys(progress.channels).length === 0) {
+            console.log('🗑️  Deleting old channels...');
             const toDelete = Array.from(source.channels.cache.values());
             for (const ch of toDelete) {
                 try {
@@ -115,18 +72,18 @@ client.on('ready', async () => {
             console.log('✅ Deletion complete');
         }
 
-        // STEP 1: Clone structure ONLY if not already done
+        // STEP 1: Clone structure
         if (Object.keys(progress.channels).length === 0) {
             console.log('📁 Cloning structure...');
             const catMap = new Map();
             const cats = target.channels.cache
-                .filter(ch => ch.type === 4)
+                .filter(ch => ch.type === ChannelType.GuildCategory)
                 .sort((a, b) => a.position - b.position);
 
             for (const cat of cats.values()) {
                 const newCat = await source.channels.create({
                     name: cat.name,
-                    type: 4,
+                    type: ChannelType.GuildCategory,
                     position: cat.position
                 }).catch(() => null);
 
@@ -140,13 +97,13 @@ client.on('ready', async () => {
             // Clone text channels
             for (const [targetCatId, sourceCatId] of catMap.entries()) {
                 const textChs = target.channels.cache
-                    .filter(ch => ch.parentId === targetCatId && ch.type === 0)
+                    .filter(ch => ch.parentId === targetCatId && ch.type === ChannelType.GuildText)
                     .sort((a, b) => a.position - b.position);
 
                 for (const ch of textChs.values()) {
                     const newCh = await source.channels.create({
                         name: ch.name,
-                        type: 0,
+                        type: ChannelType.GuildText,
                         parent: sourceCatId,
                         nsfw: true,
                         position: ch.position
@@ -154,20 +111,20 @@ client.on('ready', async () => {
 
                     if (newCh) {
                         progress.channels[ch.id] = newCh.id;
-                        console.log(`  ✓ Channel: ${ch.name}`);
+                        console.log(`  ✓ Channel: ${ch.name} (NSFW)`);
                     }
                     await sleep(300);
                 }
 
                 // Clone voice channels
                 const voiceChs = target.channels.cache
-                    .filter(ch => ch.parentId === targetCatId && ch.type === 2)
+                    .filter(ch => ch.parentId === targetCatId && ch.type === ChannelType.GuildVoice)
                     .sort((a, b) => a.position - b.position);
 
                 for (const ch of voiceChs.values()) {
                     await source.channels.create({
                         name: ch.name,
-                        type: 2,
+                        type: ChannelType.GuildVoice,
                         parent: sourceCatId,
                         position: ch.position
                     }).catch(() => null);
@@ -182,45 +139,12 @@ client.on('ready', async () => {
             console.log('✅ Structure already exists, skipping...');
         }
 
-        // STEP 2: Create webhooks for NSFW channels
-        console.log('🪝 Creating webhooks...');
-        for (const [targetChId, sourceChId] of Object.entries(progress.channels)) {
-            if (progress.webhooks[sourceChId]) {
-                console.log(`  ⏭️ Webhook exists: ${sourceChId}`);
-                continue;
-            }
-
-            const sourceCh = source.channels.cache.get(sourceChId);
-            if (!sourceCh || sourceCh.nsfw === false) continue;
-
-            try {
-                const webhook = await sourceCh.createWebhook({
-                    name: 'GRINDR_UPLOADER',
-                    avatar: null
-                }).catch(() => null);
-
-                if (webhook) {
-                    progress.webhooks[sourceChId] = {
-                        id: webhook.id,
-                        token: webhook.token
-                    };
-                    console.log(`  ✓ Webhook: #${sourceCh.name}`);
-                }
-            } catch (err) {
-                console.error(`  ✗ Error: #${sourceCh.name}`);
-            }
-            await sleep(300);
-        }
-
-        saveProgress();
-        console.log('✅ Webhooks created');
-
-        // STEP 3: Copy messages
+        // STEP 2: Copy messages with GRINDR.MP4 links (NO EMBEDS)
         console.log('📥 Copying messages...');
 
         for (const [targetChId, sourceChId] of Object.entries(progress.channels)) {
-            if (progress.channels[targetChId].copied) {
-                console.log(`⏭️ #${targetChId}`);
+            if (typeof progress.channels[targetChId] === 'object' && progress.channels[targetChId].copied) {
+                console.log(`  ⏭️  Already copied: #${targetChId}`);
                 continue;
             }
 
@@ -229,12 +153,12 @@ client.on('ready', async () => {
 
             if (!targetCh || !sourceCh) continue;
 
-            if (!progress.channels[targetChId]) {
+            if (typeof progress.channels[targetChId] !== 'object') {
                 progress.channels[targetChId] = { copied: false, lastId: null, count: 0 };
             }
 
             try {
-                console.log(`📂 Copying #${targetCh.name}...`);
+                console.log(`  📂 Copying #${targetCh.name}...`);
                 let lastId = progress.channels[targetChId].lastId;
                 let count = progress.channels[targetChId].count;
 
@@ -252,43 +176,32 @@ client.on('ready', async () => {
                             if (msg.system || msg.author.bot) continue;
                             if (!msg.content && msg.attachments.size === 0 && msg.embeds.length === 0) continue;
 
-                            const files = [];
+                            let messageContent = '';
 
+                            // Aggiungi il testo del messaggio
+                            if (msg.content) {
+                                messageContent += msg.content + '\n';
+                            }
+
+                            // Aggiungi i link ai file come [GRINDR.MP4](url) SENZA EMBED
                             for (const att of msg.attachments.values()) {
                                 try {
-                                    const ext = att.name.split('.').pop();
-                                    const data = await downloadFile(att.url);
-                                    if (data) {
-                                        files.push({ attachment: data, name: `GRINDR.${ext}` });
-                                        progress.stats.files++;
-                                    }
+                                    const ext = att.name.split('.').pop() || 'mp4';
+                                    const fileName = `GRINDR.${ext.toUpperCase()}`;
+                                    
+                                    // Formato: [GRINDR.MP4](url) - NO EMBED
+                                    messageContent += `[${fileName}](${att.url})\n`;
+                                    progress.stats.files++;
                                 } catch (err) {
-                                    console.log(`    ⚠️ Download failed: ${att.name}`);
+                                    console.log(`    ⚠️  Error: ${att.name}`);
                                 }
                             }
 
-                            // Use webhook if available, else direct send
-                            const webhook = progress.webhooks[sourceChId];
-                            if (webhook && files.length > 0) {
-                                try {
-                                    await axios.post(
-                                        `https://discordapp.com/api/webhooks/${webhook.id}/${webhook.token}`,
-                                        { files: files },
-                                        { headers: { 'Content-Type': 'multipart/form-data' } }
-                                    ).catch(() => {});
-                                } catch (err) {
-                                    await sourceCh.send({ files: files }).catch(() => {});
-                                }
-                            } else if (files.length > 0) {
-                                await sourceCh.send({ files: files }).catch(() => {});
-                            }
-
-                            if (msg.embeds.length > 0) {
-                                await sourceCh.send({ embeds: msg.embeds.slice(0, 10) }).catch(() => {});
-                            }
-
-                            if (msg.content && files.length === 0) {
-                                await sourceCh.send({ content: msg.content.slice(0, 2000) }).catch(() => {});
+                            // Invia il messaggio se ha contenuto
+                            if (messageContent.trim()) {
+                                await sourceCh.send({ 
+                                    content: messageContent.slice(0, 2000) 
+                                }).catch(() => {});
                             }
 
                             count++;
@@ -296,10 +209,6 @@ client.on('ready', async () => {
                             progress.channels[targetChId].lastId = msg.id;
                             progress.channels[targetChId].count = count;
                             saveProgress();
-
-                            if (progress.stats.messages % 20 === 0) {
-                                await saveToGitHub();
-                            }
 
                             await sleep(500);
 
@@ -315,10 +224,9 @@ client.on('ready', async () => {
 
                 progress.channels[targetChId].copied = true;
                 saveProgress();
-                await saveToGitHub();
 
             } catch (err) {
-                console.error(`✗ Error: #${targetCh.name}`);
+                console.error(`  ✗ Error: #${targetCh.name}`);
                 saveProgress();
             }
 
@@ -341,19 +249,6 @@ client.on('ready', async () => {
         process.exit(1);
     }
 });
-
-async function downloadFile(url) {
-    try {
-        const res = await axios.get(url, {
-            responseType: 'arraybuffer',
-            timeout: 30000,
-            maxContentLength: 50000000
-        });
-        return Buffer.from(res.data);
-    } catch (err) {
-        return null;
-    }
-}
 
 function sleep(ms) {
     return new Promise(resolve => setTimeout(resolve, ms));
