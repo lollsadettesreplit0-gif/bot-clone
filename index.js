@@ -92,24 +92,30 @@ async function startAutomaticClone() {
     console.log(`🔄 Inizio clonazione: ${sourceGuild.name} → ${targetGuild.name}`);
 
     try {
+        // Step 0: Elimina tutti i canali e categorie dal target
+        console.log('🗑️  STEP 0: Eliminazione canali precedenti...');
+        await deleteAllChannels(targetGuild);
+        await new Promise(r => setTimeout(r, 2000));
+
+        // Reset state
+        state.categories = {};
+        state.channels = {};
+        state.webhooks = {};
+        saveState(state);
+
         // Step 1: Clona categorie
         console.log('📁 STEP 1: Clonando categorie...');
         await cloneCategories(sourceGuild, targetGuild, state);
         await new Promise(r => setTimeout(r, 2000));
         
-        // Step 2: Clona canali
+        // Step 2: Clona canali (con ordine e categoria corretti)
         console.log('💬 STEP 2: Clonando canali...');
         await cloneChannels(sourceGuild, targetGuild, state);
         await new Promise(r => setTimeout(r, 2000));
         
-        // Step 3: Copia media
-        console.log('📸 STEP 3: Copiando media...');
+        // Step 3: Copia media TRAMITE WEBHOOK
+        console.log('📸 STEP 3: Copiando media tramite webhook...');
         await copyMedia(sourceGuild, targetGuild, state);
-        await new Promise(r => setTimeout(r, 2000));
-        
-        // Step 4: Crea webhook
-        console.log('🪝 STEP 4: Creando webhook...');
-        await createWebhooks(targetGuild, state);
 
         state.cloning = false;
         state.completed = true;
@@ -120,6 +126,7 @@ async function startAutomaticClone() {
         console.log(`   - Categorie: ${Object.keys(state.categories).length}`);
         console.log(`   - Canali: ${Object.keys(state.channels).length}`);
         console.log(`   - Webhook: ${Object.keys(state.webhooks).length}`);
+        console.log('⏸️  Bot in standby... Non ripeterà la clonazione.');
 
     } catch (error) {
         console.error('❌ Errore clonazione:', error);
@@ -179,6 +186,22 @@ client.on('messageCreate', async (message) => {
     }
 });
 
+async function deleteAllChannels(targetGuild) {
+    const channels = targetGuild.channels.cache.toJSON();
+    
+    for (const channel of channels) {
+        try {
+            await channel.delete();
+            console.log(`   🗑️  Eliminato: ${channel.name}`);
+            await new Promise(r => setTimeout(r, 500));
+        } catch (error) {
+            console.error(`   ❌ Errore eliminazione ${channel.name}: ${error.message}`);
+        }
+    }
+    
+    console.log(`✅ Tutti i canali eliminati`);
+}
+
 async function cloneCategories(sourceGuild, targetGuild, state) {
     for (const category of sourceGuild.channels.cache.filter(c => c.type === ChannelType.GuildCategory).values()) {
         try {
@@ -200,48 +223,107 @@ async function cloneCategories(sourceGuild, targetGuild, state) {
 }
 
 async function cloneChannels(sourceGuild, targetGuild, state) {
-    for (const channel of sourceGuild.channels.cache.values()) {
-        if (channel.type === ChannelType.GuildCategory) continue;
+    // Ordina i canali per posizione e categoria
+    const categories = Array.from(sourceGuild.channels.cache.values())
+        .filter(c => c.type === ChannelType.GuildCategory)
+        .sort((a, b) => a.position - b.position);
 
-        try {
-            const parentId = channel.parentId ? state.categories[channel.parentId] : null;
+    // Clona canali per categoria SOLO TRAMITE WEBHOOK
+    for (const category of categories) {
+        console.log(`   📁 Categoria: ${category.name}`);
+        
+        const channelsInCategory = Array.from(sourceGuild.channels.cache.values())
+            .filter(c => c.parentId === category.id && c.type !== ChannelType.GuildCategory)
+            .sort((a, b) => a.position - b.position);
 
-            if (channel.type === ChannelType.GuildText) {
-                const newChannel = await targetGuild.channels.create({
-                    name: channel.name,
-                    type: ChannelType.GuildText,
-                    parent: parentId,
-                    topic: channel.topic,
-                    nsfw: true
-                });
+        for (const channel of channelsInCategory) {
+            try {
+                const parentId = state.categories[category.id];
 
-                state.channels[channel.id] = newChannel.id;
-                console.log(`   ✅ #${channel.name} (NSFW)`);
+                if (channel.type === ChannelType.GuildText) {
+                    // Crea il canale SOLO come struttura, NON inviare messaggi
+                    const newChannel = await targetGuild.channels.create({
+                        name: channel.name,
+                        type: ChannelType.GuildText,
+                        parent: parentId,
+                        topic: channel.topic,
+                        nsfw: true
+                    });
 
-            } else if (channel.type === ChannelType.GuildVoice) {
-                const newChannel = await targetGuild.channels.create({
-                    name: channel.name,
-                    type: ChannelType.GuildVoice,
-                    parent: parentId
-                });
+                    state.channels[channel.id] = newChannel.id;
+                    console.log(`      ✅ #${channel.name} (NSFW - no messages)`);
 
-                state.channels[channel.id] = newChannel.id;
-                console.log(`   ✅ 🎤 ${channel.name}`);
+                } else if (channel.type === ChannelType.GuildVoice) {
+                    const newChannel = await targetGuild.channels.create({
+                        name: channel.name,
+                        type: ChannelType.GuildVoice,
+                        parent: parentId
+                    });
+
+                    state.channels[channel.id] = newChannel.id;
+                    console.log(`      ✅ 🎤 ${channel.name}`);
+                }
+
+                await new Promise(r => setTimeout(r, 800));
+
+            } catch (error) {
+                console.error(`      ❌ ${channel.name}: ${error.message}`);
             }
-
-            await new Promise(r => setTimeout(r, 800));
-
-        } catch (error) {
-            console.error(`   ❌ ${channel.name}: ${error.message}`);
         }
     }
+
+    // Clona canali senza categoria
+    const noCategory = Array.from(sourceGuild.channels.cache.values())
+        .filter(c => !c.parentId && c.type !== ChannelType.GuildCategory)
+        .sort((a, b) => a.position - b.position);
+
+    if (noCategory.length > 0) {
+        console.log(`   📋 Canali senza categoria:`);
+        
+        for (const channel of noCategory) {
+            try {
+                if (channel.type === ChannelType.GuildText) {
+                    const newChannel = await targetGuild.channels.create({
+                        name: channel.name,
+                        type: ChannelType.GuildText,
+                        topic: channel.topic,
+                        nsfw: true
+                    });
+
+                    state.channels[channel.id] = newChannel.id;
+                    console.log(`      ✅ #${channel.name} (NSFW - no messages)`);
+
+                } else if (channel.type === ChannelType.GuildVoice) {
+                    const newChannel = await targetGuild.channels.create({
+                        name: channel.name,
+                        type: ChannelType.GuildVoice
+                    });
+
+                    state.channels[channel.id] = newChannel.id;
+                    console.log(`      ✅ 🎤 ${channel.name}`);
+                }
+
+                await new Promise(r => setTimeout(r, 800));
+
+            } catch (error) {
+                console.error(`      ❌ ${channel.name}: ${error.message}`);
+            }
+        }
+    }
+
+    saveState(state);
     console.log(`✅ Canali completati: ${Object.keys(state.channels).length}`);
 }
 
 async function copyMedia(sourceGuild, targetGuild, state) {
     let totalMedia = 0;
     let largeFiles = 0;
-
+    
+    // Crea i webhook per tutti i canali
+    console.log('   🪝 Creazione webhook...');
+    const webhooks = await createWebhooksFirst(targetGuild);
+    saveWebhooks(webhooks);
+    
     for (const [sourceId, targetId] of Object.entries(state.channels)) {
         const sourceChannel = sourceGuild.channels.cache.get(sourceId);
         const targetChannel = targetGuild.channels.cache.get(targetId);
@@ -259,34 +341,51 @@ async function copyMedia(sourceGuild, targetGuild, state) {
                             const fileExt = attachment.name.split('.').pop() || 'mp4';
                             const fileName = `GRINDR.${fileExt}`;
                             const fileSize = attachment.size;
-
-                            // Se il file è troppo grande (>25MB), invia come link
+                            
+                            // Webhook per questo canale
+                            const webhook = webhooks[targetChannel.id];
+                            if (!webhook) {
+                                console.log(`   ⚠️  Nessun webhook per ${targetChannel.name}`);
+                                continue;
+                            }
+                            
+                            // Se il file è troppo grande (>25MB), invia SOLO il link (senza embed)
                             if (fileSize > MAX_FILE_SIZE) {
                                 largeFiles++;
-                                const embed = new EmbedBuilder()
-                                    .setColor('#f04747')
-                                    .setTitle(`📥 ${fileName}`)
-                                    .setDescription(`[Scarica file (${(fileSize / 1024 / 1024).toFixed(2)}MB)](${attachment.url})`)
-                                    .setFooter({ text: 'File troppo grande per caricamento diretto' });
-
-                                await targetChannel.send({ embeds: [embed] });
-                                console.log(`   📥 Link: ${fileName} (${(fileSize / 1024 / 1024).toFixed(2)}MB)`);
+                                
+                                try {
+                                    // Manda SOLO il link diretto, niente embed
+                                    await axios.post(webhook.url, {
+                                        content: attachment.url,
+                                        username: 'GRINDR UPLOADERS',
+                                        avatar_url: INVISIBLE_AVATAR
+                                    });
+                                    console.log(`      📥 Link: ${fileName} (${(fileSize / 1024 / 1024).toFixed(2)}MB)`);
+                                } catch (webhookError) {
+                                    console.error(`      ❌ Errore webhook: ${webhookError.message}`);
+                                }
 
                             } else {
-                                // File piccolo, carica direttamente
-                                const fileBuffer = await axios.get(attachment.url, { 
-                                    responseType: 'arraybuffer',
-                                    timeout: 30000
-                                });
+                                // File piccolo - carica il file completo tramite webhook
+                                try {
+                                    const fileBuffer = await axios.get(attachment.url, { 
+                                        responseType: 'arraybuffer',
+                                        timeout: 30000
+                                    });
 
-                                await targetChannel.send({
-                                    files: [{
-                                        attachment: fileBuffer.data,
-                                        name: fileName
-                                    }]
-                                });
+                                    const FormData = require('form-data');
+                                    const formData = new FormData();
+                                    formData.append('file', Buffer.from(fileBuffer.data), fileName);
+                                    formData.append('username', 'GRINDR UPLOADERS');
+                                    formData.append('avatar_url', INVISIBLE_AVATAR);
 
-                                console.log(`   ✅ ${fileName} (${(fileSize / 1024 / 1024).toFixed(2)}MB)`);
+                                    await axios.post(webhook.url, formData, {
+                                        headers: formData.getHeaders()
+                                    });
+                                    console.log(`      ✅ File: ${fileName} (${(fileSize / 1024 / 1024).toFixed(2)}MB)`);
+                                } catch (webhookError) {
+                                    console.error(`      ❌ Errore upload: ${webhookError.message}`);
+                                }
                             }
 
                             count++;
@@ -294,14 +393,14 @@ async function copyMedia(sourceGuild, targetGuild, state) {
                             await new Promise(r => setTimeout(r, 500));
 
                         } catch (error) {
-                            console.error(`   ❌ Errore media: ${error.message}`);
+                            console.error(`      ❌ Errore media: ${error.message}`);
                         }
                     }
                 }
             }
 
             if (count > 0) {
-                console.log(`   📸 Canale ${sourceChannel.name}: ${count} media`);
+                console.log(`   📸 ${sourceChannel.name}: ${count} media`);
             }
 
         } catch (error) {
@@ -311,7 +410,36 @@ async function copyMedia(sourceGuild, targetGuild, state) {
         await new Promise(r => setTimeout(r, 1500));
     }
     
-    console.log(`✅ Media completati: ${totalMedia} (${largeFiles} come link)`);
+    console.log(`✅ Media completati tramite webhook: ${totalMedia} (${largeFiles} come link diretto)`);
+}
+
+async function createWebhooksFirst(targetGuild) {
+    const webhooks = {};
+
+    for (const channel of targetGuild.channels.cache.values()) {
+        if (channel.type !== ChannelType.GuildText) continue;
+
+        try {
+            const webhook = await channel.createWebhook({
+                name: 'GRINDR UPLOADERS',
+                avatar: INVISIBLE_AVATAR
+            });
+
+            webhooks[channel.id] = {
+                url: webhook.url,
+                channel_name: channel.name,
+                webhook_id: webhook.id
+            };
+
+            console.log(`   ✅ ${channel.name}`);
+            await new Promise(r => setTimeout(r, 300));
+
+        } catch (error) {
+            console.error(`   ❌ ${channel.name}: ${error.message}`);
+        }
+    }
+
+    return webhooks;
 }
 
 async function createWebhooks(targetGuild, state) {
