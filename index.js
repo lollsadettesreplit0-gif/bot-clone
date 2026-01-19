@@ -1,4 +1,4 @@
-const { Client, ChannelType, IntentsBitField } = require('discord.js');
+const { Client } = require('discord.js');
 const axios = require('axios');
 const fs = require('fs');
 const http = require('http');
@@ -18,11 +18,11 @@ const GITHUB_REPO = process.env.GITHUB_REPO;
 
 const client = new Client({
     intents: [
-        IntentsBitField.Flags.Guilds,
-        IntentsBitField.Flags.GuildChannels,
-        IntentsBitField.Flags.GuildMessages,
-        IntentsBitField.Flags.MessageContent,
-        IntentsBitField.Flags.DirectMessages
+        'Guilds',
+        'GuildChannels',
+        'GuildMessages',
+        'MessageContent',
+        'DirectMessages'
     ]
 });
 
