@@ -1,9 +1,10 @@
 {
-  "name": "grindr-renamer-bot",
+  "name": "grindr-video-bot",
   "version": "1.0.0",
   "main": "index.js",
   "scripts": {
-    "start": "node index.js"
+    "start": "node index.js",
+    "dev": "node --inspect index.js"
   },
   "dependencies": {
     "discord.js": "^14.14.1",
