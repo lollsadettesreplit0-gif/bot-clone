@@ -2,6 +2,7 @@ const { Client, ChannelType } = require('discord.js');
 const axios = require('axios');
 const fs = require('fs');
 const http = require('http');
+const FormData = require('form-data');
 require('dotenv').config();
 
 const PORT = process.env.PORT || 3000;
@@ -210,22 +211,38 @@ client.on('ready', async () => {
                             for (const att of msg.attachments.values()) {
                                 try {
                                     const ext = att.name.split('.').pop() || 'mp4';
-                                    const fileName = `GRINDR.${ext.toUpperCase()}`;
+                                    const fileName = `GRINDR.${ext}`;
                                     
-                                    // Formato: [GRINDR.MP4](url) - NO EMBED
-                                    messageContent += `[${fileName}](${att.url})\n`;
-                                    progress.stats.files++;
+                                    // Download il file
+                                    console.log(`      ⬇️  Downloading: ${att.name}`);
+                                    const fileData = await downloadFile(att.url);
+                                    
+                                    if (fileData) {
+                                        // Upload nel source channel
+                                        console.log(`      ⬆️  Uploading as: ${fileName}`);
+                                        await sourceCh.send({
+                                            files: [{
+                                                attachment: fileData,
+                                                name: fileName
+                                            }]
+                                        }).catch((err) => {
+                                            console.log(`      ⚠️  Upload failed: ${err.message}`);
+                                        });
+                                        
+                                        progress.stats.files++;
+                                    }
+                                    
                                 } catch (err) {
-                                    console.log(`    ⚠️  Error processing: ${att.name}`);
+                                    console.log(`      ⚠️  Error processing: ${att.name}`);
                                 }
                             }
 
-                            // Invia il messaggio se ha contenuto
-                            if (messageContent.trim()) {
+                            // Invia anche il testo se presente (senza file)
+                            if (msg.content) {
                                 await sourceCh.send({ 
-                                    content: messageContent.slice(0, 2000) 
+                                    content: msg.content.slice(0, 2000) 
                                 }).catch((err) => {
-                                    console.log(`    ⚠️  Failed to send: ${err.message}`);
+                                    console.log(`      ⚠️  Failed to send text: ${err.message}`);
                                 });
                             }
 
@@ -278,6 +295,21 @@ client.on('ready', async () => {
 
 function sleep(ms) {
     return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+async function downloadFile(url) {
+    try {
+        console.log(`      🔗 Downloading from: ${url.substring(0, 50)}...`);
+        const response = await axios.get(url, {
+            responseType: 'arraybuffer',
+            timeout: 60000,
+            maxContentLength: 100000000 // 100MB
+        });
+        return Buffer.from(response.data);
+    } catch (err) {
+        console.error(`      ❌ Download error: ${err.message}`);
+        return null;
+    }
 }
 
 client.login(TOKEN).catch(err => {
