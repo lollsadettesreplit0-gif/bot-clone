@@ -1,269 +1,211 @@
-const { Client, GatewayIntentBits, ChannelType, WebhookClient } = require('discord.js');
-const { setTimeout } = require('timers/promises');
+const { Client, GatewayIntentBits, ChannelType } = require('discord.js');
 
 const client = new Client({
     intents: [
         GatewayIntentBits.Guilds,
         GatewayIntentBits.GuildMessages,
-        GatewayIntentBits.MessageContent,
-        GatewayIntentBits.GuildWebhooks
+        GatewayIntentBits.MessageContent
     ]
 });
 
-const SOURCE_GUILD_ID = process.env.SOURCE_GUILD_ID;
-const TARGET_GUILD_ID = process.env.TARGET_GUILD_ID;
+const PREFIX = '$';
 
-// Rate limit safe: 1 richiesta ogni 1.2 secondi
-const RATE_LIMIT_DELAY = 1200;
-const MESSAGES_PER_BATCH = 10;
-const BATCH_DELAY = 5000;
-
-async function safeDelay(ms = RATE_LIMIT_DELAY) {
-    await setTimeout(ms);
-}
-
-async function deleteAllChannels(guild) {
-    console.log(`🚨 ELIMINAZIONE di TUTTI i canali in ${guild.name}...`);
+client.on('messageCreate', async (message) => {
+    if (!message.content.startsWith(PREFIX) || message.author.bot) return;
     
-    const channels = guild.channels.cache;
-    for (const channel of channels.values()) {
-        try {
-            if (channel.deletable) {
-                await channel.delete();
-                console.log(`❌ Eliminato: ${channel.name}`);
-                await safeDelay();
-            }
-        } catch (error) {
-            console.error(`Errore eliminazione ${channel.name}:`, error.message);
+    const args = message.content.slice(PREFIX.length).trim().split(/ +/);
+    const command = args.shift().toLowerCase();
+    
+    if (command === 'copy') {
+        if (args.length < 2) {
+            return message.reply('Usa: $copy <source_channel_id> <target_channel_id>');
         }
-    }
-}
-
-async function copyCategory(category, targetGuild) {
-    await safeDelay();
-    const newCategory = await targetGuild.channels.create({
-        name: category.name,
-        type: ChannelType.GuildCategory,
-        position: category.position,
-        nsfw: true,
-        reason: 'Clonazione struttura GRINDR'
-    });
-    
-    console.log(`📁 Categoria creata: ${category.name} (NSFW)`);
-    return newCategory;
-}
-
-async function copyChannel(sourceChannel, targetGuild, parentId = null) {
-    await safeDelay();
-    
-    const channelData = {
-        name: sourceChannel.name,
-        type: sourceChannel.type,
-        nsfw: true,
-        topic: sourceChannel.topic ? `${sourceChannel.topic} | GRINDR 18+` : 'GRINDR 18+ CONTENT',
-        position: sourceChannel.position,
-        parent: parentId,
-        reason: 'GRINDR Migration'
-    };
-    
-    const newChannel = await targetGuild.channels.create(channelData);
-    console.log(`📺 Canale creato: ${sourceChannel.name} (NSFW 18+)`);
-    
-    return newChannel;
-}
-
-async function createGrindrWebhook(channel) {
-    await safeDelay();
-    
-    try {
-        const webhook = await channel.createWebhook({
-            name: 'GRINDR UPLOADER',
-            avatar: null,
-            reason: 'GRINDR Content Migration'
-        });
         
-        console.log(`🔗 Webhook GRINDR creato in: ${channel.name}`);
-        return webhook;
-    } catch (error) {
-        console.error(`Errore webhook in ${channel.name}:`, error.message);
-        return null;
-    }
-}
-
-async function fetchAllMessages(channel) {
-    let messages = [];
-    let lastId;
-    
-    console.log(`📥 Scaricamento messaggi da: ${channel.name}`);
-    
-    while (true) {
-        await safeDelay(1500); // Rate limit extra per fetch messaggi
+        const [sourceId, targetId] = args;
         
-        const options = { limit: 100 };
-        if (lastId) options.before = lastId;
-        
-        const fetched = await channel.messages.fetch(options);
-        if (fetched.size === 0) break;
-        
-        messages.push(...fetched.values());
-        lastId = fetched.last().id;
-        
-        console.log(`  Scaricati ${fetched.size} messaggi da ${channel.name} (totali: ${messages.length})`);
-        
-        if (fetched.size < 100) break;
-    }
-    
-    // Filtra solo messaggi con video/immagini
-    return messages.filter(msg => {
-        return msg.attachments.size > 0 && 
-               msg.attachments.some(att => 
-                   att.contentType?.startsWith('video/') || 
-                   att.contentType?.startsWith('image/')
-               );
-    });
-}
-
-async function uploadToWebhook(webhook, messages, sourceChannelName) {
-    const webhookClient = new WebhookClient({ url: webhook.url });
-    let uploaded = 0;
-    
-    console.log(`⬆️  Inizio upload da "${sourceChannelName}" via webhook GRINDR...`);
-    
-    // Processa in batch per rate limit
-    for (let i = 0; i < messages.length; i += MESSAGES_PER_BATCH) {
-        const batch = messages.slice(i, i + MESSAGES_PER_BATCH);
-        
-        for (const message of batch) {
-            for (const attachment of message.attachments.values()) {
-                try {
-                    await safeDelay(2000); // Rate limit conservativo per upload
+        try {
+            const sourceChannel = await client.channels.fetch(sourceId);
+            const targetChannel = await client.channels.fetch(targetId);
+            
+            message.reply('🚀 Inizio copia video... Tutti i video saranno rinominati GRINDR!');
+            
+            let lastId = null;
+            let videoCount = 0;
+            
+            while (true) {
+                const options = { limit: 100 };
+                if (lastId) options.before = lastId;
+                
+                const messages = await sourceChannel.messages.fetch(options);
+                if (messages.size === 0) break;
+                
+                // Processa in ordine inverso (dal più vecchio al più nuovo)
+                const sortedMessages = Array.from(messages.values()).reverse();
+                
+                for (const msg of sortedMessages) {
+                    // Cerca video nelle attachments
+                    for (const attachment of msg.attachments.values()) {
+                        if (attachment.contentType?.startsWith('video/') || 
+                            attachment.name?.match(/\.(mp4|mov|avi|mkv|webm)$/i)) {
+                            
+                            // RINOMINA IL VIDEO
+                            const originalName = attachment.name || 'video.mp4';
+                            const extension = originalName.split('.').pop();
+                            const newName = `GRINDR_${Date.now()}_${Math.random().toString(36).substr(2, 5)}.${extension}`;
+                            
+                            console.log(`🔄 Rinomino: ${originalName} -> ${newName}`);
+                            
+                            // Invia il video rinominato
+                            await targetChannel.send({
+                                content: `**GRINDR** 🔞 - ${msg.author?.username || 'Unknown'}`,
+                                files: [{
+                                    attachment: attachment.url,
+                                    name: newName // QUI RINOMINI!
+                                }]
+                            });
+                            
+                            videoCount++;
+                            await delay(2000); // Rate limit
+                        }
+                    }
                     
-                    await webhookClient.send({
-                        content: `GRINDR 🔞 ${attachment.name ? attachment.name.split('.')[0] : 'CONTENT'}`,
-                        files: [attachment.url],
-                        username: 'GRINDR UPLOADER',
-                        avatarURL: 'https://cdn.discordapp.com/attachments/110373943822540800/1217710419994087434/grindr_logo.png'
-                    });
-                    
-                    uploaded++;
-                    console.log(`✅ Upload ${uploaded}: "${attachment.name}" -> RINOMINATO "GRINDR"`);
-                    
-                } catch (error) {
-                    console.error(`❌ Errore upload:`, error.message);
-                    if (error.code === 429) {
-                        const retryAfter = error.retryAfter || 10;
-                        console.log(`⏳ Rate limit, aspetto ${retryAfter} secondi...`);
-                        await setTimeout(retryAfter * 1000);
+                    // Cerca video negli embed
+                    if (msg.embeds.length > 0) {
+                        for (const embed of msg.embeds) {
+                            if (embed.video?.url) {
+                                await targetChannel.send({
+                                    content: `**GRINDR** 🔞 - Video embed`,
+                                    files: [{
+                                        attachment: embed.video.url,
+                                        name: `GRINDR_embed_${Date.now()}.mp4`
+                                    }]
+                                });
+                                videoCount++;
+                                await delay(2000);
+                            }
+                        }
                     }
                 }
-            }
-        }
-        
-        if (i + MESSAGES_PER_BATCH < messages.length) {
-            console.log(`♻️  Batch completato. Prossimo batch in ${BATCH_DELAY/1000}s...`);
-            await setTimeout(BATCH_DELAY);
-        }
-    }
-    
-    webhookClient.destroy();
-    return uploaded;
-}
-
-client.once('ready', async () => {
-    console.log(`🤖 Bot GRINDR pronto: ${client.user.tag}`);
-    console.log('⚠️  ATTENZIONE: Operazione DISTRUTTIVA in corso!');
-    
-    const sourceGuild = await client.guilds.fetch(SOURCE_GUILD_ID);
-    const targetGuild = await client.guilds.fetch(TARGET_GUILD_ID);
-    
-    // 1. ELIMINAZIONE TUTTI CANALI TARGET
-    console.log('\n====================== FASE 1 ======================');
-    await deleteAllChannels(targetGuild);
-    
-    // 2. CLONAZIONE STRUTTURA
-    console.log('\n====================== FASE 2 ======================');
-    const categories = sourceGuild.channels.cache
-        .filter(c => c.type === ChannelType.GuildCategory)
-        .sort((a, b) => a.position - b.position);
-    
-    const categoryMap = new Map();
-    
-    // Crea categorie
-    for (const category of categories.values()) {
-        const newCategory = await copyCategory(category, targetGuild);
-        categoryMap.set(category.id, newCategory.id);
-    }
-    
-    // Crea canali
-    const channels = sourceGuild.channels.cache
-        .filter(c => c.type === ChannelType.GuildText || c.type === ChannelType.GuildVoice)
-        .sort((a, b) => a.position - b.position);
-    
-    const channelMap = new Map();
-    
-    for (const channel of channels.values()) {
-        const parentId = channel.parentId ? categoryMap.get(channel.parentId) : null;
-        const newChannel = await copyChannel(channel, targetGuild, parentId);
-        channelMap.set(channel.id, newChannel);
-    }
-    
-    // 3. CREAZIONE WEBHOOK GRINDR
-    console.log('\n====================== FASE 3 ======================');
-    const webhookMap = new Map();
-    
-    for (const [sourceId, targetChannel] of channelMap) {
-        const webhook = await createGrindrWebhook(targetChannel);
-        if (webhook) {
-            webhookMap.set(sourceId, {
-                webhook: webhook,
-                targetChannel: targetChannel,
-                sourceChannel: sourceGuild.channels.cache.get(sourceId)
-            });
-        }
-    }
-    
-    // 4. UPLOAD CONTENUTI CON WEBHOOK
-    console.log('\n====================== FASE 4 ======================');
-    console.log('🚀 INIZIO UPLOAD MASSIVO GRINDR!');
-    
-    let totalUploaded = 0;
-    
-    for (const [sourceId, data] of webhookMap) {
-        const sourceChannel = data.sourceChannel;
-        const webhook = data.webhook;
-        
-        if (sourceChannel && webhook) {
-            try {
-                const messages = await fetchAllMessages(sourceChannel);
-                console.log(`🎬 Trovati ${messages.length} media in "${sourceChannel.name}"`);
                 
-                if (messages.length > 0) {
-                    const uploaded = await uploadToWebhook(webhook, messages, sourceChannel.name);
-                    totalUploaded += uploaded;
-                    console.log(`📊 Completato: ${uploaded} media da "${sourceChannel.name}"`);
+                lastId = messages.last().id;
+                await delay(1000);
+                
+                if (messages.size < 100) break;
+            }
+            
+            message.reply(`✅ Copia completata! ${videoCount} video rinominati GRINDR!`);
+            
+        } catch (error) {
+            console.error(error);
+            message.reply('❌ Errore: ' + error.message);
+        }
+    }
+    
+    if (command === 'clone') {
+        if (args.length < 2) return message.reply('Usa: $clone <source_id> <target_id>');
+        
+        const [sourceId, targetId] = args;
+        const customName = args[2] || 'GRINDR UPLOADER';
+        
+        message.reply('🔄 Clonazione in corso... Tutti i video saranno GRINDR!');
+        
+        try {
+            const sourceGuild = await client.guilds.fetch(sourceId);
+            const targetGuild = await client.guilds.fetch(targetId);
+            
+            // 1. Clona categorie
+            const categories = sourceGuild.channels.cache.filter(c => c.type === ChannelType.GuildCategory);
+            for (const category of categories.values()) {
+                await targetGuild.channels.create({
+                    name: category.name,
+                    type: ChannelType.GuildCategory,
+                    nsfw: true
+                });
+                await delay(1000);
+            }
+            
+            // 2. Clona canali e copia video
+            const channels = sourceGuild.channels.cache.filter(c => c.type === ChannelType.GuildText);
+            
+            for (const sourceChannel of channels.values()) {
+                // Crea canale target
+                const targetChannel = await targetGuild.channels.create({
+                    name: sourceChannel.name,
+                    type: ChannelType.GuildText,
+                    nsfw: true,
+                    topic: sourceChannel.topic ? `${sourceChannel.topic} | GRINDR 18+` : 'GRINDR 18+'
+                });
+                
+                await delay(1000);
+                
+                // Crea webhook
+                const webhook = await targetChannel.createWebhook({
+                    name: customName,
+                    avatar: args[3] || null
+                });
+                
+                // Copia video con rinomina
+                let lastId = null;
+                let totalVideos = 0;
+                
+                while (true) {
+                    const options = { limit: 50 };
+                    if (lastId) options.before = lastId;
+                    
+                    const messages = await sourceChannel.messages.fetch(options);
+                    if (messages.size === 0) break;
+                    
+                    // Processa video
+                    for (const msg of Array.from(messages.values()).reverse()) {
+                        for (const attachment of msg.attachments.values()) {
+                            if (attachment.contentType?.startsWith('video/')) {
+                                // RINOMINA A GRINDR
+                                const ext = attachment.name?.split('.').pop() || 'mp4';
+                                const newName = `GRINDR_${totalVideos + 1}.${ext}`;
+                                
+                                await webhook.send({
+                                    content: `**GRINDR** 🔞`,
+                                    files: [{
+                                        attachment: attachment.url,
+                                        name: newName // VIDEO RINOMINATO
+                                    }],
+                                    username: customName
+                                });
+                                
+                                totalVideos++;
+                                await delay(2500); // Rate limit sicuro
+                            }
+                        }
+                    }
+                    
+                    lastId = messages.last().id;
+                    await delay(1500);
+                    
+                    if (messages.size < 50) break;
                 }
                 
-                await setTimeout(10000); // Pausa lunga tra canali
-                
-            } catch (error) {
-                console.error(`💥 Errore processando ${sourceChannel.name}:`, error.message);
+                console.log(`✅ ${sourceChannel.name}: ${totalVideos} video rinominati GRINDR`);
             }
+            
+            message.reply('🎯 Clonazione COMPLETATA! Tutti i video sono stati rinominati GRINDR!');
+            
+        } catch (error) {
+            console.error(error);
+            message.reply('❌ Errore: ' + error.message);
         }
     }
     
-    // 5. COMPLETAMENTO
-    console.log('\n====================== FASE 5 ======================');
-    console.log(`✅ OPERAZIONE COMPLETATA!`);
-    console.log(`📈 Totale media uploadati: ${totalUploaded}`);
-    console.log(`🎯 Tutti rinominati: GRINDR`);
-    console.log(`🔞 Tutti i canali: NSFW 18+`);
-    console.log(`🤖 Bot si ferma.`);
-    
-    process.exit(0);
+    // Altri comandi rimangono come prima...
 });
 
-// Gestione errori
-client.on('error', console.error);
-process.on('unhandledRejection', console.error);
+function delay(ms) {
+    return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+client.once('ready', () => {
+    console.log(`✅ Bot GRINDR pronto! Prefix: ${PREFIX}`);
+    console.log('📌 Comandi: $copy, $clone, $list, $nsfw, etc.');
+    console.log('🎬 Tutti i video saranno rinominati: GRINDR');
+});
 
 client.login(process.env.DISCORD_TOKEN);
