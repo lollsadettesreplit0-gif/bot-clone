@@ -53,14 +53,23 @@ client.once('ready', async () => {
     try {
         // STEP 1: Delete all
         console.log('🗑️  Deleting old channels...');
+        console.log(`Checking permissions in: ${src.name}`);
+        console.log(`Bot permissions: ${src.me.permissions.toArray().join(', ')}\n`);
+        
+        if (!src.me.permissions.has('ManageChannels')) {
+            console.error('❌ Bot does NOT have ManageChannels permission!');
+            process.exit(1);
+        }
+
         let deleted = 0;
         for (const ch of src.channels.cache.values()) {
             try {
                 await ch.delete();
                 deleted++;
+                console.log(`  ✓ Deleted: ${ch.name}`);
                 await sleep(300);
             } catch (e) {
-                console.log(`  ⚠️  Failed: ${ch.name}`);
+                console.log(`  ❌ Error deleting ${ch.name}: ${e.message}`);
             }
         }
         console.log(`✅ Deleted ${deleted} channels\n`);
