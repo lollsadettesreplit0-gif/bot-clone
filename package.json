@@ -1,17 +1,14 @@
 {
-  "name": "discord-server-cloner",
+  "name": "grindr-migrator",
   "version": "1.0.0",
-  "description": "Clone Discord servers with media",
   "main": "index.js",
   "scripts": {
     "start": "node index.js"
   },
   "dependencies": {
-    "discord.js": "^14.14.0",
-    "axios": "^1.6.5",
-    "dotenv": "^16.3.1"
+    "discord.js": "^14.14.1"
   },
   "engines": {
     "node": ">=18.0.0"
   }
-} 
+}
