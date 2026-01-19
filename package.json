@@ -1,6 +1,7 @@
 {
   "name": "discord-server-cloner",
   "version": "1.0.0",
+  "description": "Clone Discord servers with media",
   "main": "index.js",
   "scripts": {
     "start": "node index.js"
@@ -8,9 +9,9 @@
   "dependencies": {
     "discord.js": "^14.14.0",
     "axios": "^1.6.5",
-    "dotenv": "^16.4.1"
+    "dotenv": "^16.3.1"
   },
   "engines": {
-    "node": ">=16.x"
+    "node": ">=18.0.0"
   }
-}
+} 
